@@ -186,6 +186,8 @@ def main():
                         help="Minimum pass rate to consider successful (default: 0.9)")
     parser.add_argument("--limit", type=int, default=10,
                         help="Maximum number of examples to generate")
+    parser.add_argument("--auto-pr", action="store_true",
+                        help="Automatically register and create PRs for generated examples")
     
     args = parser.parse_args()
     
@@ -198,15 +200,34 @@ def main():
     print(f"[CONFIG] Domain: {args.domain}")
     print(f"[CONFIG] Output: {output_dir}")
     print(f"[CONFIG] Min Score: {args.min_score}")
+    print(f"[CONFIG] Auto-PR: {'Enabled' if args.auto_pr else 'Disabled'}")
     print(f"{'='*60}\n")
     
-    run_retrospective(
+    generated = run_retrospective(
         trace_dir=args.trace_dir,
         domain=args.domain,
         output_dir=output_dir,
         min_score=args.min_score,
         limit=args.limit
     )
+    
+    # Auto-PR workflow
+    if args.auto_pr and generated:
+        print(f"\n[AUTO-PR] Registering {len(generated)} examples...")
+        from optimizer.registry import register_example, create_pr
+        
+        # Detect repo root
+        repo_root = Path.cwd()
+        while repo_root != repo_root.parent:
+            if (repo_root / ".git").exists():
+                break
+            repo_root = repo_root.parent
+        
+        for example_path in generated:
+            path = Path(example_path)
+            register_example(path, repo_root, args.domain)
+            # Optionally create PR (can be done in batch later)
+            # create_pr(path, repo_root)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,14 @@
+{
+  "examples": [
+    {
+      "path": "examples/security/parameterized_query_golden.example.md",
+      "domain": "security",
+      "registered_at": "2025-12-26T11:06:12.246484",
+      "pr_created": false,
+      "pr_url": null,
+      "merged": false
+    }
+  ],
+  "pending_prs": [],
+  "last_sync": null
+}
