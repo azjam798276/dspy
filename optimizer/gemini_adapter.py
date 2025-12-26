@@ -43,7 +43,9 @@ class GeminiSkillAdapter(dspy.Module):
         output_format: str = "json",
         base_instruction: str = "",
         context_dir: Optional[Path] = None,
-        demos: List = None
+        demos: List = None,
+        semantic_matcher = None,
+        top_k: int = 3
     ):
         super().__init__()
         self.gemini_binary = gemini_binary
@@ -53,6 +55,8 @@ class GeminiSkillAdapter(dspy.Module):
         self.output_format = output_format
         self.base_instruction = base_instruction
         self.demos = demos or []
+        self.semantic_matcher = semantic_matcher
+        self.top_k = top_k
         
         # Define the predictor. Its instructions are the optimization target.
         self.predictor = dspy.Predict(GeminiSignature)
@@ -91,8 +95,14 @@ class GeminiSkillAdapter(dspy.Module):
             full_context = f"{self.base_instruction}\n\n{instruction}" if self.base_instruction else instruction
             self._write_context_atomic(full_context)
             
-            # Step 2: Prepare prompt with demos
-            prompt = self._prepare_prompt(story_context, tech_stack, self.demos)
+            # Step 2: Select demos - use semantic matching if available, else fixed demos
+            selected_demos = self.demos
+            if self.semantic_matcher:
+                matched = self.semantic_matcher.match(story_context, self.top_k)
+                selected_demos = [ex for ex, _ in matched]
+            
+            # Step 3: Prepare prompt with selected demos
+            prompt = self._prepare_prompt(story_context, tech_stack, selected_demos)
             
             # Step 3: Invoke Gemini CLI
             result = self._execute_gemini_with_retry(prompt, rollout_id)

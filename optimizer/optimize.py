@@ -233,6 +233,8 @@ def run_optimization(
     gemini_binary: str,
     examples_dir: Optional[Path],
     use_bootstrap: bool,
+    use_semantic: bool,
+    top_k: int,
     verbose: bool
 ) -> None:
     timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
@@ -264,8 +266,18 @@ def run_optimization(
     
     # Load examples if provided
     demos = []
+    semantic_matcher = None
     if examples_dir and examples_dir.exists():
         demos = load_examples_from_dir(examples_dir, tech_stack)
+        
+        # Initialize semantic matcher if requested
+        if use_semantic and demos:
+            from optimizer.semantic_matcher import is_available, SemanticMatcher
+            if is_available():
+                print(f"[INFO] Initializing SemanticMatcher with {len(demos)} examples (top-{top_k})")
+                semantic_matcher = SemanticMatcher(examples=demos, examples_dir=examples_dir)
+            else:
+                print("[WARN] Semantic matching requested but sentence-transformers not installed")
     
     # Establish isolated context directory for this session
     session_dir = repo_root / ".gemini" / "sessions" / skill_name
@@ -276,7 +288,9 @@ def run_optimization(
         repo_root=repo_root,
         base_instruction=frontmatter if target_file == "adapter.md" else "",
         context_dir=session_dir,
-        demos=demos
+        demos=demos,
+        semantic_matcher=semantic_matcher,
+        top_k=top_k
     )
     adapter.predictor.signature.instructions = baseline_context
     metric = BMadImplementationMetric(repo_root=repo_root, sandbox_mode=True)
@@ -366,6 +380,8 @@ def main():
     parser.add_argument("--examples-dir", type=Path, default=None, help="Path to directory with .example.md files")
     parser.add_argument("--bootstrap", action="store_true", help="Use BootstrapFewShot optimizer with examples")
     parser.add_argument("--dry-run", action="store_true", help="Preview configuration and loaded examples without running optimization")
+    parser.add_argument("--semantic", action="store_true", help="Use semantic matching to select examples (requires --examples-dir)")
+    parser.add_argument("--top-k", type=int, default=3, help="Number of examples to match when using --semantic")
     parser.add_argument("--verbose", action="store_true")
     
     args = parser.parse_args()
@@ -391,6 +407,7 @@ def main():
         print(f"[REPO ROOT] {repo_root}")
         print(f"[OPTIMIZER] {'BootstrapFewShot' if args.bootstrap else 'COPRO/GEPA'}")
         print(f"[MAX ROLLOUTS] {args.max_rollouts}")
+        print(f"[SEMANTIC MATCHING] {'Enabled (top-' + str(args.top_k) + ')' if args.semantic else 'Disabled'}")
         
         print(f"\n[STORIES] {len(story_paths)} files:")
         for sp in story_paths:
@@ -403,6 +420,20 @@ def main():
             for i, d in enumerate(demos):
                 problem_preview = d.story_context[:80].replace('\n', ' ') + "..."
                 print(f"  {i+1}. {problem_preview}")
+            
+            # Test semantic matching if enabled
+            if args.semantic and story_paths:
+                from optimizer.semantic_matcher import is_available, SemanticMatcher
+                if is_available():
+                    print(f"\n[SEMANTIC MATCHING TEST]")
+                    test_story = story_paths[0].read_text()[:500]
+                    matcher = SemanticMatcher(examples=demos)
+                    matched = matcher.match(test_story, args.top_k)
+                    print(f"  Query: {test_story[:80]}...")
+                    for i, (ex, score) in enumerate(matched):
+                        print(f"  {i+1}. Score: {score:.4f} | {ex.story_context[:50]}...")
+                else:
+                    print("\n[WARN] Semantic matching requested but sentence-transformers not installed")
         else:
             print("\n[EXAMPLES] None (--examples-dir not provided)")
         
@@ -422,6 +453,8 @@ def main():
         gemini_binary=args.gemini_binary,
         examples_dir=args.examples_dir.resolve() if args.examples_dir else None,
         use_bootstrap=args.bootstrap,
+        use_semantic=args.semantic,
+        top_k=args.top_k,
         verbose=args.verbose
     )
 
