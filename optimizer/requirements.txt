@@ -1,0 +1,5 @@
+dspy-ai>=2.5.0
+pytest>=7.4.0
+PyYAML>=6.0
+subprocess32>=3.5.4
+python-dotenv>=1.0.0

@@ -1,0 +1,26 @@
+# DSPy Cache
+.dspy_cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Node
+node_modules/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+nohup.out
+
+# Generated
+examples/auto_generated/
