@@ -63,7 +63,7 @@ def load_examples_from_dir(examples_dir: Path, tech_stack: str = "") -> List[dsp
         print(f"[INFO] Examples directory not found: {examples_dir}")
         return examples
     
-    for example_file in examples_dir.glob("*.example.md"):
+    for example_file in examples_dir.glob("**/*.example.md"):
         example = parse_example_file(example_file)
         if example:
             # Add tech_stack if provided

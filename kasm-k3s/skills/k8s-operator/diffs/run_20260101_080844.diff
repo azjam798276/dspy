@@ -1,0 +1,5 @@
+--- baseline_adapter.md+++ optimized_adapter.md@@ -19,4 +19,4 @@ kubectl describe pod <pod> -n kasm | grep -A20 "Events:"
+ kubectl get pvc -n kasm
+ kubectl get endpoints -n kasm
+-```
++```
