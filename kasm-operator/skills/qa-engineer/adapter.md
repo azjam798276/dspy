@@ -1,71 +1,173 @@
 ---
-name: troubleshooter
-description: Expert debugging for Kasm VDI Operator on K3s, covering Controller reconciliation, GPU time-slicing, and Selkies-WebRTC streaming failures.
+name: qa-engineer
+description: Expert in Quality Assurance for Kubernetes-native VDI platforms, specializing in end-to-end, performance, and failure testing.
 ---
 
-# Troubleshooter: Kasm VDI Operator & Infrastructure
+# QA Engineering: VDI Platform Testing Strategies
 
-## Optimization Focus
-Holistic diagnosis of the Kasm VDI stack: from Kubernetes Operator logic (`VDISession` CRDs) to infrastructure constraints (GPU Time-Slicing, `local-path` storage) and data-plane connectivity (WebRTC/Traefik).
+## Core Principles
+1. **End-to-End Coverage:** Test complete user flows from login to streaming.
+2. **Performance Baselines:** Establish latency and throughput thresholds.
+3. **Failure Injection:** Verify graceful degradation under adverse conditions.
+4. **Automation First:** All tests scriptable for CI/CD integration.
 
-## Diagnostic Hierarchy
-Execute checks in this order to isolate the failure domain:
+## Test Categories
 
-1.  **Control Plane (Operator):** Is the `kasm-operator` processing CRDs?
-    *   `kubectl get vdisession -n kasm` (Check Phase: `Pending` vs `Running`)
-    *   `kubectl logs -n kasm -l control-plane=controller-manager` (Look for Reconcile errors)
-2.  **Infrastructure (GPU/Storage):** Are resources available?
-    *   `kubectl describe pod <session-pod> -n kasm` (Check Events: `FailedScheduling`, `FailedMount`)
-3.  **Data Plane (Streaming):** Is the container healthy but unreachable?
-    *   `kubectl logs <session-pod> -n kasm` (Selkies/GStreamer logs)
-
-## Root Cause Analysis Map
-
-### 1. Operator Reconciliation Failure
-**Symptom:** `VDISession` created but no Pod/Service/Ingress appears. Status remains `Pending`.
-**Root Cause:** Operator crashed, RBAC missing, or invalid Template.
-**Verification:**
-```bash
-# Check Controller logs for permission denied or panic
-kubectl logs -n kasm -l control-plane=controller-manager --tail=50
-# Verify CRD Status
-kubectl get vdisession <name> -n kasm -o jsonpath='{.status}'
+### Unit Tests (Operator)
+```go
+func TestBuildPod(t *testing.T) {
+    session := &vdiv1alpha1.VDISession{
+        Spec: vdiv1alpha1.VDISessionSpec{
+            User:     "alice@example.com",
+            Template: "ubuntu-desktop",
+        },
+    }
+    template := &vdiv1alpha1.VDITemplate{
+        Spec: vdiv1alpha1.VDITemplateSpec{
+            Image: "selkies:latest",
+        },
+    }
+    
+    pod := reconciler.buildPod(session, template)
+    
+    assert.Equal(t, "selkies:latest", pod.Spec.Containers[0].Image)
+    assert.Contains(t, pod.Spec.Containers[0].Resources.Limits, "nvidia.com/gpu")
+}
 ```
 
-### 2. GPU Time-Slicing Mismatch
-**Symptom:** Pod `Pending` with "Insufficient nvidia.com/gpu".
-**Root Cause:** ConfigMap `time-slicing-config` missing or not applied to ClusterPolicy. Node reports 1 GPU instead of 8.
-**Fix:**
-```bash
-# Verify Node Capacity (Target: 8 per physical GPU)
-kubectl get node -o jsonpath='{.items[0].status.capacity.nvidia\.com/gpu}'
-# Apply ConfigMap if capacity is 1
-kubectl apply -f manifests/gpu-time-slicing.yaml
-kubectl rollout restart ds/nvidia-device-plugin-daemonset -n gpu-operator
+### Integration Tests (envtest)
+```go
+var _ = Describe("VDISession Controller", func() {
+    Context("When creating a VDISession", func() {
+        It("Should create a Pod with correct resources", func() {
+            session := &vdiv1alpha1.VDISession{...}
+            Expect(k8sClient.Create(ctx, session)).To(Succeed())
+            
+            Eventually(func() string {
+                k8sClient.Get(ctx, key, session)
+                return session.Status.Phase
+            }, timeout).Should(Equal("Running"))
+        })
+    })
+})
 ```
 
-### 3. Storage Permission Denied (K3s)
-**Symptom:** DB or Session Pod `CrashLoopBackOff`. Logs: `mkdir: cannot create directory ... Permission denied`.
-**Root Cause:** `local-path` provisioner defaults to root-only (0700) access.
-**Fix:**
+### E2E Tests (Real Cluster)
 ```bash
-# Update local-path-provisioner to use 0777 (world-writable) for subdirectories
-kubectl edit cm local-path-config -n kube-system
-# Change: mkdir -m 0700 -p ${absolutePath} -> mkdir -m 0777 -p ${absolutePath}
-kubectl delete pod -l app=local-path-provisioner -n kube-system
+#!/bin/bash
+# e2e_session_lifecycle.sh
+
+# Create session
+kubectl apply -f - <<EOF
+apiVersion: vdi.kasm.io/v1alpha1
+kind: VDISession
+metadata:
+  name: test-session
+spec:
+  user: test@example.com
+  template: ubuntu-desktop
+EOF
+
+# Wait for Running
+kubectl wait vdisession/test-session --for=jsonpath='{.status.phase}'=Running --timeout=60s
+
+# Verify Pod exists
+kubectl get pod -l vdi.kasm.io/session=test-session
+
+# Verify IngressRoute created
+kubectl get ingressroute test-session
+
+# Cleanup
+kubectl delete vdisession/test-session
+kubectl wait vdisession/test-session --for=delete --timeout=30s
 ```
 
-### 4. WebRTC / Ingress Routing
-**Symptom:** Session `Running` but browser shows 404 or WebSocket disconnects.
-**Root Cause:** Traefik `IngressRoute` regex mismatch or Coturn blocked.
-**Verification:**
-```bash
-# Verify IngressRoute matches the Host header
-kubectl get ingressroute -n kasm -o yaml
-# Test Network path to Pod (Port 8080)
-kubectl port-forward -n kasm <session-pod> 8080:8080
-# (Then open localhost:8080 in browser to rule out Traefik)
+## Performance Testing
+
+### Latency Measurement
+```javascript
+// WebRTC stats collection
+const stats = await peerConnection.getStats();
+stats.forEach(report => {
+    if (report.type === 'inbound-rtp' && report.kind === 'video') {
+        console.log('Jitter:', report.jitter);
+        console.log('Packets Lost:', report.packetsLost);
+        console.log('Frames Decoded:', report.framesDecoded);
+    }
+});
 ```
+
+### Load Testing
+```bash
+# Concurrent session creation
+for i in $(seq 1 8); do
+  kubectl apply -f - <<EOF
+apiVersion: vdi.kasm.io/v1alpha1
+kind: VDISession
+metadata:
+  name: load-test-$i
+spec:
+  user: load-$i@test.com
+  template: ubuntu-desktop
+EOF
+done
+
+# Measure time to all Running
+time kubectl wait vdisession -l test=load --for=jsonpath='{.status.phase}'=Running --timeout=120s
+```
+
+## Failure Scenario Tests
+
+### GPU Unavailable
+```bash
+# Taint GPU node
+kubectl taint nodes gpu-node nvidia.com/gpu=:NoSchedule
+
+# Create session, expect Pending
+kubectl apply -f session.yaml
+kubectl wait vdisession/test --for=jsonpath='{.status.phase}'=Pending --timeout=10s
+
+# Remove taint, expect Running
+kubectl taint nodes gpu-node nvidia.com/gpu-
+kubectl wait vdisession/test --for=jsonpath='{.status.phase}'=Running --timeout=60s
+```
+
+### Session Timeout
+```bash
+# Create session with 1m timeout
+kubectl apply -f - <<EOF
+apiVersion: vdi.kasm.io/v1alpha1
+kind: VDISession
+metadata:
+  name: timeout-test
+spec:
+  user: test@example.com
+  template: ubuntu-desktop
+  timeout: "1m"
+EOF
+
+# Wait for auto-termination
+sleep 90
+kubectl get vdisession timeout-test || echo "Session correctly terminated"
+```
+
+## Acceptance Criteria Checklist
+- [ ] Session creates Pod within 30s
+- [ ] WebRTC connects with < 50ms latency
+- [ ] 8 concurrent sessions on single GPU
+- [ ] Graceful cleanup on session delete
+- [ ] Timeout enforcement works
+- [ ] TURN relay functions for NAT clients
+- [ ] Dashboard displays real-time status
+
+## Performance Targets
+| Test | Threshold |
+|------|-----------|
+| Session startup | < 30s |
+| Video latency | < 50ms |
+| Concurrent sessions | 8 per GPU |
+| Cleanup time | < 10s |
+| Operator reconcile | < 100ms |
 
 ## Demonstrations
 

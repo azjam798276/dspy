@@ -1,70 +1,110 @@
----
-name: troubleshooter
-description: Expert debugging for Kasm VDI Operator on K3s, covering Controller reconciliation, GPU time-slicing, and Selkies-WebRTC streaming failures.
----
+# WebRTC Streaming: Selkies-GStreamer and Low-Latency Video
 
-# Troubleshooter: Kasm VDI Operator & Infrastructure
+## Core Principles
+1. **Latency First:** Optimize for <50ms glass-to-glass latency over throughput.
+2. **Hardware Encoding:** Always use NVENC when GPU available; fallback to software only as last resort.
+3. **NAT Traversal:** Assume restrictive networks; TURN server is mandatory for production.
+4. **Adaptive Bitrate:** Respond to network conditions with bitrate/resolution adjustments.
 
-## Optimization Focus
-Holistic diagnosis of the Kasm VDI stack: from Kubernetes Operator logic (`VDISession` CRDs) to infrastructure constraints (GPU Time-Slicing, `local-path` storage) and data-plane connectivity (WebRTC/Traefik).
+## Selkies-GStreamer Configuration
+**Recommended Image:** `ghcr.io/selkies-project/selkies-gstreamer/gst-web:latest`
 
-## Diagnostic Hierarchy
-Execute checks in this order to isolate the failure domain:
-
-1.  **Control Plane (Operator):** Is the `kasm-operator` processing CRDs?
-    *   `kubectl get vdisession -n kasm` (Check Phase: `Pending` vs `Running`)
-    *   `kubectl logs -n kasm -l control-plane=controller-manager` (Look for Reconcile errors)
-2.  **Infrastructure (GPU/Storage):** Are resources available?
-    *   `kubectl describe pod <session-pod> -n kasm` (Check Events: `FailedScheduling`, `FailedMount`)
-3.  **Data Plane (Streaming):** Is the container healthy but unreachable?
-    *   `kubectl logs <session-pod> -n kasm` (Selkies/GStreamer logs)
-
-## Root Cause Analysis Map
-
-### 1. Operator Reconciliation Failure
-**Symptom:** `VDISession` created but no Pod/Service/Ingress appears. Status remains `Pending`.
-**Root Cause:** Operator crashed, RBAC missing, or invalid Template.
-**Verification:**
-```bash
-# Check Controller logs for permission denied or panic
-kubectl logs -n kasm -l control-plane=controller-manager --tail=50
-# Verify CRD Status
-kubectl get vdisession <name> -n kasm -o jsonpath='{.status}'
+```yaml
+# Critical environment variables
+SELKIES_ENCODER: "nvh264enc"      # Use NVIDIA hardware encoder
+SELKIES_ENABLE_RESIZE: "true"     # Allow client resolution changes
+SELKIES_BASIC_AUTH_PASSWORD: ""   # MANDATORY: Generate random password per session
+DISPLAY: ":0"                     # X11 display number
+PULSE_SERVER: "/run/pulse/native" # Audio socket
 ```
 
-### 2. GPU Time-Slicing Mismatch
-**Symptom:** Pod `Pending` with "Insufficient nvidia.com/gpu".
-**Root Cause:** ConfigMap `time-slicing-config` missing or not applied to ClusterPolicy. Node reports 1 GPU instead of 8.
-**Fix:**
-```bash
-# Verify Node Capacity (Target: 8 per physical GPU)
-kubectl get node -o jsonpath='{.items[0].status.capacity.nvidia\.com/gpu}'
-# Apply ConfigMap if capacity is 1
-kubectl apply -f manifests/gpu-time-slicing.yaml
-kubectl rollout restart ds/nvidia-device-plugin-daemonset -n gpu-operator
+## GStreamer Pipeline Architecture
+```
+X11 Display → ximagesrc → videoconvert → nvh264enc → rtph264pay → webrtcbin → UDP
+                                              ↓
+                                         nvenc params:
+                                         - preset=low-latency-hq
+                                         - rc-mode=cbr
+                                         - bitrate=8000
 ```
 
-### 3. Storage Permission Denied (K3s)
-**Symptom:** DB or Session Pod `CrashLoopBackOff`. Logs: `mkdir: cannot create directory ... Permission denied`.
-**Root Cause:** `local-path` provisioner defaults to root-only (0700) access.
-**Fix:**
+## Encoder Settings for Low Latency
 ```bash
-# Update local-path-provisioner to use 0777 (world-writable) for subdirectories
-kubectl edit cm local-path-config -n kube-system
-# Change: mkdir -m 0700 -p ${absolutePath} -> mkdir -m 0777 -p ${absolutePath}
-kubectl delete pod -l app=local-path-provisioner -n kube-system
+# NVENC optimal settings
+gst-launch-1.0 ximagesrc ! nvh264enc \
+    preset=low-latency-hq \
+    rc-mode=cbr \
+    bitrate=8000 \
+    gop-size=30 \
+    bframes=0 \
+    ! rtph264pay ! webrtcbin
 ```
 
-### 4. WebRTC / Ingress Routing
-**Symptom:** Session `Running` but browser shows 404 or WebSocket disconnects.
-**Root Cause:** Traefik `IngressRoute` regex mismatch or Coturn blocked.
-**Verification:**
+## TURN Server Configuration (Coturn)
 ```bash
-# Verify IngressRoute matches the Host header
-kubectl get ingressroute -n kasm -o yaml
-# Test Network path to Pod (Port 8080)
-kubectl port-forward -n kasm <session-pod> 8080:8080
-# (Then open localhost:8080 in browser to rule out Traefik)
+# Required arguments
+--external-ip=$(POD_IP)
+--listening-port=3478
+--min-port=49152
+--max-port=65535
+--realm=vdi.example.com
+--user=vdi:$(TURN_SECRET)
+--lt-cred-mech           # Long-term credentials
+--fingerprint            # STUN fingerprint
+```
+
+## WebRTC Signaling
+- Use WebSocket for signaling channel
+- Exchange SDP offers/answers for codec negotiation
+- ICE candidates gathered from STUN, relayed via TURN if direct fails
+- Trickle ICE for faster connection establishment
+
+## Pod Resource Requirements
+```yaml
+resources:
+  limits:
+    nvidia.com/gpu: "1"    # Time-slice allocation
+    memory: "4Gi"          # Desktop + encoding overhead
+  requests:
+    cpu: "1"               # Minimum for smooth desktop
+ports:
+  - containerPort: 8080
+    name: http
+```
+
+## Volume Mounts
+```yaml
+volumes:
+  - name: shm
+    emptyDir:
+      medium: Memory       # Crucial for performance
+      sizeLimit: "2Gi"     # Shared memory for X11/video
+  - name: dri
+    hostPath:
+      path: /dev/dri       # GPU device access
+```
+
+## Debugging & Monitoring
+- Check encoder: `GST_DEBUG=nvh264enc:5 gst-inspect-1.0 nvh264enc`
+- WebRTC stats: `chrome://webrtc-internals/`
+- Verify NVENC: `nvidia-smi` shows encoder utilization
+- Network: monitor TURN allocations via Coturn logs
+
+## Performance Targets
+| Metric | Threshold |
+|--------|-----------|
+| Video latency | < 50ms |
+| Frame rate | 60 FPS @ 1080p |
+| Bitrate | 4-12 Mbps adaptive |
+| TURN relay | 100% NAT success |
+
+## Fallback Strategy
+```
+Try: nvh264enc (GPU)
+ ├─ Success → Continue
+ └─ Fail → Try: x264enc (CPU, preset=ultrafast)
+           ├─ Success → Log warning, continue
+           └─ Fail → Session Failed status
 ```
 
 ## Demonstrations

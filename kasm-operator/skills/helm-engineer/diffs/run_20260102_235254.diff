@@ -1,0 +1,81 @@
+--- baseline_adapter.md+++ optimized_adapter.md@@ -37,4 +37,81 @@ ## Reflective Lifecycle
+ - **Metric:** `session_startup_seconds`. Target: < 30s.
+ - **Action:** If startup is slow (>30s), inspect the `pullPolicy` (prefer `IfNotPresent`) and check if the GPU time-slice allows immediate scheduling.
+-- **Recovery:** If `helm upgrade` fails, run `helm rollback <release> 0` immediately to restore service.+- **Recovery:** If `helm upgrade` fails, run `helm rollback <release> 0` immediately to restore service.
++
++## Demonstrations
++
++### Example 1
++**Problem:**
++Configure Kasm Workspaces Helm chart for a resource-constrained K3s cluster (4-8GB RAM).
++- Override default storage class to `local-path`.
++- reduce connection/resource limits for single-node.
++- Disable internal Ingress/LB to use existing external Traefik.
++
++**Solution:**
++### Optimized values.yaml
++```yaml
++# path: helm/k3s-values.yaml
++global:
++  hostname: kasm.example.com
++  storageClass: local-path
++  image:
++    pullPolicy: IfNotPresent  # Use IfNotPresent for dev speed, Always for prod
++  ingress:
++    enabled: false  # Disable internal LB/Ingress (we use external Traefik)
++
++# PostgreSQL overrides for K3s local-path
++postgres:
++  primary:
++    persistence:
++      storageClass: local-path
++    resources:
++      requests:
++        cpu: 250m
++        memory: 512Mi
++      limits:
++        cpu: 500m
++        memory: 1Gi
++
++# Low-resource Redis settings
++redis:
++  resources:
++    requests:
++      cpu: 100m
++      memory: 256Mi
++    limits:
++      cpu: 200m
++      memory: 512Mi
++
++# Manager tuned for single-node
++kasmManager:
++  resources:
++    requests:
++      cpu: 500m
++      memory: 1Gi
++    limits:
++      cpu: 1000m
++      memory: 2Gi
++
++# API tuned for single-node
++kasmApi:
++  resources:
++    requests:
++      cpu: 250m
++      memory: 512Mi
++    limits:
++      cpu: 500m
++      memory: 1Gi
++```
++
++### Installation Command
++```bash
++# Verify overrides are applied
++helm install kasm ./kasm-single-zone \
++  -n kasm \
++  --create-namespace \
++  -f k3s-values.yaml \
++  --wait --timeout 10m
++```
++
++---

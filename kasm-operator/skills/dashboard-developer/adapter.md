@@ -1,71 +1,170 @@
 ---
-name: troubleshooter
-description: Expert debugging for Kasm VDI Operator on K3s, covering Controller reconciliation, GPU time-slicing, and Selkies-WebRTC streaming failures.
+name: dashboard-developer
+description: Expert in building React-based VDI dashboards using qlkube for GraphQL interactions with Kubernetes CRDs.
 ---
 
-# Troubleshooter: Kasm VDI Operator & Infrastructure
+# Dashboard Development: React + qlkube GraphQL Integration
 
-## Optimization Focus
-Holistic diagnosis of the Kasm VDI stack: from Kubernetes Operator logic (`VDISession` CRDs) to infrastructure constraints (GPU Time-Slicing, `local-path` storage) and data-plane connectivity (WebRTC/Traefik).
+## Core Principles
+1. **Real-Time Updates:** Use GraphQL subscriptions for live session status.
+2. **Optimistic UI:** Update UI immediately, rollback on mutation failure.
+3. **OIDC Integration:** Handle auth tokens transparently; refresh before expiry.
+4. **Responsive Design:** Support desktop and tablet form factors.
 
-## Diagnostic Hierarchy
-Execute checks in this order to isolate the failure domain:
+## Technology Stack
+- **Frontend:** React 18 + TypeScript
+- **State:** React Query (TanStack Query) for server state
+- **GraphQL:** Apollo Client or urql
+- **API Gateway:** qlkube (K8s API → GraphQL)
+- **Auth:** OIDC via Keycloak/Dex
 
-1.  **Control Plane (Operator):** Is the `kasm-operator` processing CRDs?
-    *   `kubectl get vdisession -n kasm` (Check Phase: `Pending` vs `Running`)
-    *   `kubectl logs -n kasm -l control-plane=controller-manager` (Look for Reconcile errors)
-2.  **Infrastructure (GPU/Storage):** Are resources available?
-    *   `kubectl describe pod <session-pod> -n kasm` (Check Events: `FailedScheduling`, `FailedMount`)
-3.  **Data Plane (Streaming):** Is the container healthy but unreachable?
-    *   `kubectl logs <session-pod> -n kasm` (Selkies/GStreamer logs)
+## qlkube Query Patterns
+```graphql
+# List user's sessions
+query GetMySessions($user: String!) {
+  vdisessions(namespace: "vdi", labelSelector: {user: $user}) {
+    metadata { name, creationTimestamp }
+    spec { template, resources { gpu, memory } }
+    status { phase, url, podName }
+  }
+}
 
-## Root Cause Analysis Map
+# Create new session
+mutation CreateSession($input: VDISessionInput!) {
+  createVDISession(input: $input) {
+    metadata { name }
+    status { url }
+  }
+}
 
-### 1. Operator Reconciliation Failure
-**Symptom:** `VDISession` created but no Pod/Service/Ingress appears. Status remains `Pending`.
-**Root Cause:** Operator crashed, RBAC missing, or invalid Template.
-**Verification:**
-```bash
-# Check Controller logs for permission denied or panic
-kubectl logs -n kasm -l control-plane=controller-manager --tail=50
-# Verify CRD Status
-kubectl get vdisession <name> -n kasm -o jsonpath='{.status}'
+# Subscribe to status changes
+subscription WatchSession($name: String!) {
+  watchVDISession(name: $name) {
+    status { phase, url, message }
+  }
+}
 ```
 
-### 2. GPU Time-Slicing Mismatch
-**Symptom:** Pod `Pending` with "Insufficient nvidia.com/gpu".
-**Root Cause:** ConfigMap `time-slicing-config` missing or not applied to ClusterPolicy. Node reports 1 GPU instead of 8.
-**Fix:**
-```bash
-# Verify Node Capacity (Target: 8 per physical GPU)
-kubectl get node -o jsonpath='{.items[0].status.capacity.nvidia\.com/gpu}'
-# Apply ConfigMap if capacity is 1
-kubectl apply -f manifests/gpu-time-slicing.yaml
-kubectl rollout restart ds/nvidia-device-plugin-daemonset -n gpu-operator
+## Component Architecture
+```
+App
+├── AuthProvider (OIDC context)
+├── QueryProvider (React Query)
+├── Layout
+│   ├── Header (user info, logout)
+│   ├── Sidebar (template list)
+│   └── Main
+│       ├── SessionList (active sessions)
+│       ├── SessionCard (status, controls)
+│       └── LaunchModal (template selection)
 ```
 
-### 3. Storage Permission Denied (K3s)
-**Symptom:** DB or Session Pod `CrashLoopBackOff`. Logs: `mkdir: cannot create directory ... Permission denied`.
-**Root Cause:** `local-path` provisioner defaults to root-only (0700) access.
-**Fix:**
-```bash
-# Update local-path-provisioner to use 0777 (world-writable) for subdirectories
-kubectl edit cm local-path-config -n kube-system
-# Change: mkdir -m 0700 -p ${absolutePath} -> mkdir -m 0777 -p ${absolutePath}
-kubectl delete pod -l app=local-path-provisioner -n kube-system
+## Session Card Component
+```tsx
+interface SessionCardProps {
+  session: VDISession;
+  onTerminate: () => void;
+}
+
+const SessionCard: React.FC<SessionCardProps> = ({ session, onTerminate }) => {
+  const phaseColor = {
+    Running: 'green',
+    Pending: 'yellow',
+    Creating: 'blue',
+    Failed: 'red',
+  }[session.status.phase];
+
+  return (
+    <Card>
+      <Badge color={phaseColor}>{session.status.phase}</Badge>
+      <Text>{session.spec.template}</Text>
+      {session.status.url && (
+        <Button as="a" href={session.status.url} target="_blank">
+          Connect
+        </Button>
+      )}
+      <Button variant="danger" onClick={onTerminate}>
+        Terminate
+      </Button>
+    </Card>
+  );
+};
 ```
 
-### 4. WebRTC / Ingress Routing
-**Symptom:** Session `Running` but browser shows 404 or WebSocket disconnects.
-**Root Cause:** Traefik `IngressRoute` regex mismatch or Coturn blocked.
-**Verification:**
-```bash
-# Verify IngressRoute matches the Host header
-kubectl get ingressroute -n kasm -o yaml
-# Test Network path to Pod (Port 8080)
-kubectl port-forward -n kasm <session-pod> 8080:8080
-# (Then open localhost:8080 in browser to rule out Traefik)
+## Authentication Flow
+```typescript
+// OIDC configuration
+const oidcConfig = {
+  authority: 'https://keycloak.example.com/realms/vdi',
+  client_id: 'vdi-dashboard',
+  redirect_uri: window.location.origin + '/callback',
+  scope: 'openid profile email',
+};
+
+// Attach token to GraphQL requests
+const authLink = setContext((_, { headers }) => ({
+  headers: {
+    ...headers,
+    authorization: `Bearer ${getAccessToken()}`,
+  },
+}));
 ```
+
+## Error Handling
+```tsx
+const { data, error, isLoading } = useQuery('sessions', fetchSessions);
+
+if (error?.status === 401) {
+  // Token expired, trigger refresh
+  return <RedirectToLogin />;
+}
+
+if (error?.status === 403) {
+  return <AccessDenied />;
+}
+```
+
+## Template Selection UI
+- Display available VDITemplates with icons
+- Show resource requirements (GPU, memory)
+- Estimate queue position if resources exhausted
+- Disable launch if user quota exceeded
+
+## Responsive Breakpoints
+```css
+/* Mobile first */
+.session-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+}
+
+ @media (min-width: 768px) {
+  .session-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+ @media (min-width: 1200px) {
+  .session-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+```
+
+## Performance Targets
+| Metric | Threshold |
+|--------|-----------|
+| Initial load | < 2s |
+| Session list refresh | < 500ms |
+| Launch to URL | < 30s |
+| Status update | Real-time |
+
+## Accessibility
+- All interactive elements keyboard accessible
+- ARIA labels for session status
+- Color-blind safe status indicators
+- Screen reader announcements for phase changes
 
 ## Demonstrations
 
