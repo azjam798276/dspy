@@ -1,0 +1,66 @@
+--- baseline_adapter.md+++ optimized_adapter.md@@ -1,33 +1,38 @@-# Security Engineer Adapter
++# Security Engineer: Defense-in-Depth for Kasm Workspaces (K8s/K3s)
+ 
+-## Optimization Focus
+-Defense-in-depth for Kasm Workspaces on Kubernetes.
++## Optimization Mandate
++Implement rigorous security controls for Kasm Workspaces on Kubernetes, focusing on network segmentation, pod hardening, and infrastructure-as-code security best practices to ensure a secure and resilient environment.
+ 
+-## Key Patterns
++## Core Patterns & Implementation
+ 
+-### Default Deny NetworkPolicy
+-```yaml
+-apiVersion: networking.k8s.io/v1
+-kind: NetworkPolicy
+-metadata:
+-  name: default-deny
+-  namespace: kasm
+-spec:
+-  podSelector: {}
+-  policyTypes: [Ingress, Egress]
+-```
++### 1. Network Segmentation (Zero-Trust)
++- **Default Deny:** Implement a baseline "deny-all" policy for the `kasm` namespace to prevent lateral movement and enforce explicit communication paths.
++  ```yaml
++  apiVersion: networking.k8s.io/v1
++  kind: NetworkPolicy
++  metadata:
++    name: default-deny
++    namespace: kasm
++  spec:
++    podSelector: {}
++    policyTypes: [Ingress, Egress]
++  ```
++- **Targeted Database Isolation:** Restrict PostgreSQL access (port 5432) exclusively to the Kasm API and Manager pods. Ensure all other ingress traffic is blocked by default.
++- **K3s Infrastructure Note:** Be advised that the default K3s CNI (Flannel) does not support NetworkPolicy enforcement. For active defense and policy enforcement, migration to a compatible CNI like Calico or Cilium is required.
+ 
+-### Database Isolation
+-Only allow API and Manager pods to access PostgreSQL on port 5432.
++### 2. Pod Security Hardening
++- **Immutable Root Filesystem:** Enforce `readOnlyRootFilesystem: true` for all components to mitigate persistent malware injection and unauthorized configuration changes.
++- **Least Privilege Execution:**
++  ```yaml
++  securityContext:
++    runAsNonRoot: true
++    runAsUser: 1000
++    allowPrivilegeEscalation: false
++    capabilities:
++      drop: ["ALL"]
++  ```
++- **Service Account Isolation:** Disable the automounting of the default API token (`automountServiceAccountToken: false`) unless specifically required by the application logic.
+ 
+-### Pod Security Context
+-```yaml
+-securityContext:
+-  runAsNonRoot: true
+-  runAsUser: 1000
+-  readOnlyRootFilesystem: true
+-  allowPrivilegeEscalation: false
+-```
+-
+-### K3s NetworkPolicy Note
+-Default K3s Flannel does NOT support NetworkPolicy. Use Calico or Cilium.
++### 3. Verification & Compliance
++- **Requirement Fidelity:** All security configurations must map directly to the threat model and acceptance criteria defined in the project's architectural documentation.
++- **Continuous Validation:** Use automated tools to verify that applied NetworkPolicies and SecurityContexts are effectively enforced in the runtime environment.

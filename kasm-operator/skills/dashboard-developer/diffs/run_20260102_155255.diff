@@ -1,0 +1,23 @@
+--- baseline_SKILL.md+++ optimized_SKILL.md@@ -1,3 +1,8 @@+---
++name: dashboard-developer
++description: Expert in building React-based VDI dashboards using qlkube for GraphQL interactions with Kubernetes CRDs.
++---
++
+ # Dashboard Development: React + qlkube GraphQL Integration
+ 
+ ## Core Principles
+@@ -134,13 +139,13 @@   gap: 1rem;
+ }
+ 
+-@media (min-width: 768px) {
++ @media (min-width: 768px) {
+   .session-grid {
+     grid-template-columns: repeat(2, 1fr);
+   }
+ }
+ 
+-@media (min-width: 1200px) {
++ @media (min-width: 1200px) {
+   .session-grid {
+     grid-template-columns: repeat(3, 1fr);
+   }

@@ -1,0 +1,245 @@
+--- baseline_SKILL.md+++ optimized_SKILL.md@@ -1,195 +1,71 @@-# DevOps Engineering: K3s Deployment, Helm Charts, and Observability
++# DevOps Engineering: Kasm VDI Operator Platform (K3s)
+ 
+ ## Core Principles
+-1. **GitOps Ready:** All manifests versioned, deployable via FluxCD/ArgoCD.
+-2. **Helm for Composition:** Package operator + dependencies as single chart.
+-3. **Observability First:** Metrics, logs, and traces from day one.
+-4. **Zero-Downtime Updates:** Rolling updates with proper health checks.
++1. **Validation-Driven Infrastructure:** Validate the Selkies-GStreamer data plane (WebRTC streaming) manually before implementing operator automation.
++2. **GPU Density Optimization:** Enforce NVIDIA Time-Slicing to achieve the target of 8 users per physical GPU.
++3. **WebRTC Connectivity Stability:** Prioritize low-latency paths via host-networked Coturn and Traefik IngressRoutes with dynamic subdomain routing.
++4. **Persistent State Management:** Utilize K3s `local-path-provisioner` with node affinity for high-performance user home directory storage.
+ 
+-## K3s Cluster Setup
++## K3s & GPU Configuration
+ ```bash
+-# Install K3s with GPU support prerequisites
+-curl -sfL https://get.k3s.io | sh -s - \
+-  --disable=traefik \
+-  --write-kubeconfig-mode 644
++# 1. K3s Installation (GPU Optimized)
++curl -sfL https://get.k3s.io | sh -s - --disable=traefik --write-kubeconfig-mode 644
+ 
+-# Install NVIDIA container runtime
+-distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+-curl -s -L https://nvidia.github.io/libnvidia-container/gpgkey | sudo apt-key add -
+-curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | \
+-  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
++# 2. NVIDIA Time-Slicing Setup (8x Density)
++cat <<EOF | kubectl apply -f -
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: time-slicing-config
++  namespace: gpu-operator
++data:
++  any: |
++    version: v1
++    sharing:
++      timeSlicing:
++        resources:
++        - name: nvidia.com/gpu
++          replicas: 8
++EOF
+ 
+-# Configure containerd for NVIDIA
+-sudo nvidia-ctk runtime configure --runtime=containerd
+-sudo systemctl restart k3s
++# 3. Patch ClusterPolicy for GPU Operator
++kubectl patch clusterpolicy/cluster-policy -n gpu-operator --type merge \
++  -p '{"spec":{"devicePlugin":{"config":{"name":"time-slicing-config"}}}}'
+ ```
+ 
+-## GPU Operator Installation
+-```bash
+-helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
+-helm install gpu-operator nvidia/gpu-operator \
+-  --namespace gpu-operator --create-namespace \
+-  --set driver.enabled=false \
+-  --set toolkit.enabled=true \
+-  --set devicePlugin.config.name=time-slicing-config
+-```
++## Helm Chart Strategy
++- **Operator Chart:** Manages lifecycle of `VDISession` and `VDITemplate` CRDs and the Go-based controller.
++- **VDI Pod Templates:** Must specify:
++  - `nvidia.com/gpu: 1` (mapped to time-sliced replicas).
++  - `/dev/shm` volume (EmptyDir/Memory) for browser acceleration.
++  - `SELKIES_ENCODER=nvh264enc` environment variable for hardware encoding.
+ 
+-## Helm Chart Structure
+-```
+-charts/vdi-operator/
+-├── Chart.yaml
+-├── values.yaml
+-├── templates/
+-│   ├── deployment.yaml       # Operator deployment
+-│   ├── rbac.yaml             # ServiceAccount, ClusterRole
+-│   ├── crds/                 # VDISession, VDITemplate CRDs
+-│   ├── configmap.yaml        # Operator configuration
+-│   ├── service.yaml          # Metrics endpoint
+-│   └── servicemonitor.yaml   # Prometheus scraping
+-└── charts/
+-    └── coturn/               # TURN server subchart
+-```
+-
+-## values.yaml Configuration
+-```yaml
+-operator:
+-  image:
+-    repository: ghcr.io/org/vdi-operator
+-    tag: v0.1.0
+-  replicas: 1
+-  resources:
+-    limits:
+-      memory: 128Mi
+-      cpu: 100m
+-
+-selkies:
+-  image: ghcr.io/selkies-project/selkies-gstreamer/gst-web:latest
+-  defaultResources:
+-    gpu: 1
+-    memory: 4Gi
+-
+-ingress:
+-  enabled: true
+-  className: traefik
+-  domain: vdi.example.com
+-  tls:
+-    enabled: true
+-    certResolver: letsencrypt
+-
+-coturn:
+-  enabled: true
+-  realm: vdi.example.com
+-  secret: "${TURN_SECRET}"
+-```
+-
+-## Traefik IngressRoute
++## Dynamic Networking (Traefik)
+ ```yaml
+ apiVersion: traefik.io/v1alpha1
+ kind: IngressRoute
+ metadata:
+-  name: vdi-wildcard
++  name: vdi-dynamic-ingress
+ spec:
+-  entryPoints:
+-    - websecure
++  entryPoints: [websecure]
+   routes:
+-    - match: HostRegexp(`{subdomain:[a-z0-9-]+}.vdi.example.com`)
+-      kind: Rule
+-      services:
+-        - name: vdi-session-service
+-          port: 8080
++  - match: HostRegexp(`{user:[a-z0-9-]+}.vdi.example.com`)
++    kind: Rule
++    services:
++    - name: vdi-session-service
++      port: 8080
+   tls:
+     certResolver: letsencrypt
+-    domains:
+-      - main: "*.vdi.example.com"
++    domains: [{ main: "*.vdi.example.com" }]
+ ```
+ 
+-## Monitoring Stack
+-```yaml
+-# ServiceMonitor for operator metrics
+-apiVersion: monitoring.coreos.com/v1
+-kind: ServiceMonitor
+-metadata:
+-  name: vdi-operator
+-spec:
+-  selector:
+-    matchLabels:
+-      app: vdi-operator
+-  endpoints:
+-  - port: metrics
+-    interval: 30s
+-    path: /metrics
+-```
++## Observability & SLOs
++| Metric | Target (SLO) | Tooling |
++|--------|--------------|---------|
++| Session Startup Ready | < 30 seconds | Prometheus Exporter |
++| Glass-to-Glass Latency | < 50ms | GStreamer Trace Logs |
++| GPU Utilization | > 80% (Aggregated) | NVIDIA DCGM Exporter |
+ 
+-## Key Metrics
+-```promql
+-# Active sessions by phase
+-sum by (phase) (vdi_sessions_total)
+-
+-# Session startup latency
+-histogram_quantile(0.95, vdi_session_startup_seconds_bucket)
+-
+-# GPU utilization across sessions
+-avg(DCGM_FI_DEV_GPU_UTIL{pod=~"vdi-.*"})
+-```
+-
+-## Logging Configuration
+-```yaml
+-# Loki/Promtail for log aggregation
+-apiVersion: v1
+-kind: ConfigMap
+-metadata:
+-  name: promtail-config
+-data:
+-  promtail.yaml: |
+-    scrape_configs:
+-      - job_name: vdi-sessions
+-        kubernetes_sd_configs:
+-          - role: pod
+-        relabel_configs:
+-          - source_labels: [__meta_kubernetes_pod_label_app]
+-            regex: vdi-session
+-            action: keep
+-```
+-
+-## Backup Strategy
+-```bash
+-# Backup CRD instances
+-kubectl get vdisessions -A -o yaml > backup/sessions.yaml
+-kubectl get vditemplates -o yaml > backup/templates.yaml
+-
+-# PVC backup (optional, user data)
+-velero backup create vdi-data --include-namespaces vdi
+-```
+-
+-## CI/CD Pipeline
+-```yaml
+-# .github/workflows/release.yml
+-jobs:
+-  build:
+-    steps:
+-      - uses: actions/checkout@v4
+-      - run: make docker-build IMG=$REGISTRY/vdi-operator:$VERSION
+-      - run: make docker-push IMG=$REGISTRY/vdi-operator:$VERSION
+-      
+-  deploy:
+-    needs: build
+-    steps:
+-      - run: helm upgrade vdi-operator ./charts/vdi-operator \
+-          --set operator.image.tag=$VERSION \
+-          --atomic --wait
+-```
+-
+-## Security Checklist
+-- [ ] RBAC restricted to vdi namespace
+-- [ ] NetworkPolicy isolating session pods
+-- [ ] Pod Security Standards: restricted
+-- [ ] Secrets via external-secrets or sealed-secrets
+-- [ ] TLS everywhere (ingress, internal)
+-
+-## Performance Targets
+-| Metric | Threshold |
+-|--------|-----------|
+-| Helm deploy | < 60s |
+-| Operator startup | < 10s |
+-| Log ingestion | < 5s delay |
+-| Metric scrape | 30s interval |+## Security Hardening
++- **NetworkPolicy:** Default-deny ingress; allow only Traefik -> Session Pod (8080) and Session Pod -> Coturn (3478).
++- **RBAC:** Least-privilege ServiceAccount for the operator, restricted to the `vdi-sessions` namespace.

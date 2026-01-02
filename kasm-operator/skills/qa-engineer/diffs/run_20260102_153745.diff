@@ -1,0 +1,8 @@
+--- baseline_SKILL.md+++ optimized_SKILL.md@@ -1,3 +1,8 @@+---
++name: qa-engineer
++description: Expert in Quality Assurance for Kubernetes-native VDI platforms, specializing in end-to-end, performance, and failure testing.
++---
++
+ # QA Engineering: VDI Platform Testing Strategies
+ 
+ ## Core Principles

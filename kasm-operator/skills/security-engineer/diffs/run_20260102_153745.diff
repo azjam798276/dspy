@@ -1,0 +1,225 @@
+--- baseline_SKILL.md+++ optimized_SKILL.md@@ -1,25 +1,28 @@ # Security Engineering: VDI Platform Hardening
+ 
+ ## Core Principles
+-1. **Zero Trust:** Authenticate and authorize every request, even internal.
+-2. **Least Privilege:** Minimal RBAC permissions for operator and sessions.
+-3. **Defense in Depth:** Multiple security layers from network to application.
+-4. **Secure Defaults:** Hardened configuration out of the box.
++1. **Zero Trust Architecture:** Never trust, always verify. Every request between users, the dashboard, and the Kubernetes API must be authenticated via OIDC and authorized via RBAC.
++2. **Strict Least Privilege:** Both the VDI Operator and individual session pods must operate with the absolute minimum set of permissions. Use namespace isolation and specific resource names where possible.
++3. **Hardware-Level Isolation:** Leverage NVIDIA GPU time-slicing and strict memory limits to prevent cross-session resource exhaustion or side-channel attacks.
++4. **Secure by Default Lifecycle:** From image scanning to session auto-termination (finalizers), security is baked into the entire lifecycle of a `VDISession`.
+ 
+-## Authentication Architecture
++## Authentication & Authorization Flow
++Implement a secure "Impersonation" flow for the dashboard to interact with the K8s API:
+ ```
+-User → OIDC Provider (Keycloak) → Dashboard → Bearer Token
++User (Browser) → Keycloak (MFA) → Dashboard (OIDC Token)
+                                        │
+                                        ▼
+-                               qlkube (validates token)
++                               qlkube (Verifies Token)
+                                        │
+                                        ▼
+-                               K8s API (impersonation)
++                               K8s API (User Impersonation)
+ ```
++- **Constraint:** Dashboard must never use a high-privilege ServiceAccount to perform actions on behalf of users. Use `qlkube` to translate OIDC identities to K8s User identities.
+ 
+ ## RBAC Configuration
++### Operator Permissions (Minimal)
++The operator requires `patch` permissions for status updates and finalizer management (`vdi.kasm.io/session-cleanup`).
+ ```yaml
+-# Operator ClusterRole - minimal permissions
+ apiVersion: rbac.authorization.k8s.io/v1
+ kind: ClusterRole
+ metadata:
+@@ -36,35 +39,13 @@     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+ ```
+ 
++### User Session Control
++Users should only be able to view and manage their own sessions.
++- **Enforcement:** Use an Admission Webhook or `qlkube` filters to ensure `VDISession.spec.user` matches the authenticated OIDC sub.
++
++## Pod Security Standards
++Sessions must adhere to the Restricted Pod Security Standard:
+ ```yaml
+-# User RoleBinding - namespace-scoped
+-apiVersion: rbac.authorization.k8s.io/v1
+-kind: RoleBinding
+-metadata:
+-  name: vdi-user
+-  namespace: vdi
+-subjects:
+-  - kind: User
+-    name: alice@example.com
+-roleRef:
+-  kind: Role
+-  name: vdi-session-user
+----
+-apiVersion: rbac.authorization.k8s.io/v1
+-kind: Role
+-metadata:
+-  name: vdi-session-user
+-  namespace: vdi
+-rules:
+-  - apiGroups: ["vdi.kasm.io"]
+-    resources: ["vdisessions"]
+-    verbs: ["get", "list", "create", "delete"]
+-    # Only own sessions via resourceNames or admission webhook
+-```
+-
+-## Pod Security
+-```yaml
+-# Session pod security context
+ securityContext:
+   runAsNonRoot: true
+   runAsUser: 1000
+@@ -73,15 +54,14 @@   seccompProfile:
+     type: RuntimeDefault
+   capabilities:
+-    drop:
+-      - ALL
+-    add:
+-      - SYS_PTRACE  # Required for some desktop apps
++    drop: ["ALL"]
++    add: ["SYS_PTRACE"] # Only if required for specific desktop apps
+ ```
++- **GPU Security:** Ensure `nvidia.com/gpu: 1` is strictly enforced via limits to prevent OOM in time-sliced environments.
+ 
+-## Network Policies
++## Network Isolation (Multi-Tenant)
++Prevent lateral movement between sessions and access to cluster internals.
+ ```yaml
+-# Isolate session pods
+ apiVersion: networking.k8s.io/v1
+ kind: NetworkPolicy
+ metadata:
+@@ -90,101 +70,39 @@ spec:
+   podSelector:
+     matchLabels:
+-      app: vdi-session
+-  policyTypes:
+-    - Ingress
+-    - Egress
++      app.kubernetes.io/name: vdi-session
++  policyTypes: ["Ingress", "Egress"]
+   ingress:
+     - from:
+-        - namespaceSelector:
+-            matchLabels:
+-              name: traefik
++        - namespaceSelector: { matchLabels: { name: "traefik" } }
+       ports:
+         - port: 8080
+   egress:
+-    - to:
+-        - ipBlock:
+-            cidr: 0.0.0.0/0
+-            except:
+-              - 10.0.0.0/8      # Block internal
+-              - 172.16.0.0/12
+-              - 192.168.0.0/16
+-    - to:
+-        - namespaceSelector:
+-            matchLabels:
+-              name: kube-system
+-      ports:
+-        - port: 53
+-          protocol: UDP
++    - to: [{ ipBlock: { cidr: "0.0.0.0/0", except: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] } }]
++    - to: # Allow DNS
++        - namespaceSelector: { matchLabels: { name: "kube-system" } }
++      ports: [{ port: 53, protocol: "UDP" }, { port: 53, protocol: "TCP" }]
++    - to: # Allow TURN/STUN for WebRTC
++        - podSelector: { matchLabels: { app: "coturn" } }
++      ports: [{ port: 3478 }]
+ ```
+ 
+-## Secrets Management
+-```yaml
+-# External Secrets Operator integration
+-apiVersion: external-secrets.io/v1beta1
+-kind: ExternalSecret
+-metadata:
+-  name: turn-credentials
+-spec:
+-  refreshInterval: 1h
+-  secretStoreRef:
+-    name: vault-backend
+-    kind: ClusterSecretStore
+-  target:
+-    name: coturn-secret
+-  data:
+-    - secretKey: turn_secret
+-      remoteRef:
+-        key: vdi/coturn
+-        property: secret
+-```
++## Secrets & Data Plane Security
++- **Dynamic Credentials:** `SELKIES_BASIC_AUTH_PASSWORD` must be unique per session and never stored in cleartext in the `VDISession` object.
++- **TLS 1.3:** Enforce TLS 1.3 for all Traefik `IngressRoute` objects using `TLSOption`.
++- **Image Trust:** Only allow images from signed/trusted registries. Implement `ImagePolicyWebhook` if possible.
+ 
+-## TLS Configuration
+-```yaml
+-# Traefik TLS options
+-apiVersion: traefik.io/v1alpha1
+-kind: TLSOption
+-metadata:
+-  name: secure
+-spec:
+-  minVersion: VersionTLS12
+-  cipherSuites:
+-    - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+-    - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+-  curvePreferences:
+-    - CurveP521
+-    - CurveP384
+-```
++## Threat Model & Mitigation
++| Threat | Mitigation |
++|--------|------------|
++| GPU Resource Exhaustion | Enforce `nvidia.com/gpu` replicas limits (Max 8 per physical GPU). |
++| Data Exfiltration | Disable clipboard/drive sharing in `VDITemplate` properties. |
++| Ingress Spoofing | Use `Host(`{user}.vdi.example.com`)` with sanitized usernames in IngressRoutes. |
++| Stale Sessions | Implement auto-termination logic using `VDISession.spec.timeout`. |
+ 
+-## Audit Logging
+-```yaml
+-# K8s audit policy for VDI events
+-apiVersion: audit.k8s.io/v1
+-kind: Policy
+-rules:
+-  - level: RequestResponse
+-    resources:
+-      - group: "vdi.kasm.io"
+-        resources: ["vdisessions"]
+-    verbs: ["create", "delete"]
+-```
+-
+-## Threat Model
+-| Threat | Vector | Mitigation |
+-|--------|--------|------------|
+-| Session hijacking | Stolen token | Short-lived tokens, session binding |
+-| Lateral movement | Compromised session | NetworkPolicy isolation |
+-| Privilege escalation | Container escape | PodSecurityPolicy, seccomp |
+-| Data exfiltration | Session clipboard | Disable clipboard (optional) |
+-| Resource exhaustion | GPU monopolization | Quotas, time-slicing limits |
+-
+-## Security Checklist
+-- [ ] OIDC provider hardened (MFA enabled)
+-- [ ] RBAC principle of least privilege
+-- [ ] NetworkPolicy isolating sessions
+-- [ ] Pod runs as non-root
+-- [ ] Secrets externalized (no env vars in CRD)
+-- [ ] TLS 1.2+ everywhere
+-- [ ] Audit logging enabled
+-- [ ] Container images scanned
+-- [ ] No privileged containers (except init)+## Compliance Checklist
++- [ ] Operator RBAC contains no wildcard `*` permissions.
++- [ ] `VDITemplate` changes are audited via K8s Audit Policy.
++- [ ] NetworkPolicy blocks access to Cloud Metadata APIs (169.254.169.254).
++- [ ] Persistent volumes use encrypted storage classes (where supported by `local-path`).
++- [ ] Coturn server is host-networked but restricted via firewall to UDP 3478 and 49152-65535.

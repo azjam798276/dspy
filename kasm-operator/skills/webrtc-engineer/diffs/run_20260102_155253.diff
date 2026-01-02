@@ -1,0 +1,31 @@
+--- baseline_SKILL.md+++ optimized_SKILL.md@@ -7,11 +7,13 @@ 4. **Adaptive Bitrate:** Respond to network conditions with bitrate/resolution adjustments.
+ 
+ ## Selkies-GStreamer Configuration
++**Recommended Image:** `ghcr.io/selkies-project/selkies-gstreamer/gst-web:latest`
++
+ ```yaml
+ # Critical environment variables
+ SELKIES_ENCODER: "nvh264enc"      # Use NVIDIA hardware encoder
+ SELKIES_ENABLE_RESIZE: "true"     # Allow client resolution changes
+-SELKIES_BASIC_AUTH_PASSWORD: ""   # Set per-session password
++SELKIES_BASIC_AUTH_PASSWORD: ""   # MANDATORY: Generate random password per session
+ DISPLAY: ":0"                     # X11 display number
+ PULSE_SERVER: "/run/pulse/native" # Audio socket
+ ```
+@@ -65,6 +67,9 @@     memory: "4Gi"          # Desktop + encoding overhead
+   requests:
+     cpu: "1"               # Minimum for smooth desktop
++ports:
++  - containerPort: 8080
++    name: http
+ ```
+ 
+ ## Volume Mounts
+@@ -72,7 +77,7 @@ volumes:
+   - name: shm
+     emptyDir:
+-      medium: Memory
++      medium: Memory       # Crucial for performance
+       sizeLimit: "2Gi"     # Shared memory for X11/video
+   - name: dri
+     hostPath:
